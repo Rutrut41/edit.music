@@ -15,6 +15,7 @@ export function GenreManager() {
   const [genres, setGenres] = useState<GenreRow[]>([])
   const [map, setMap] = useState<GenreMap>({})
   const [scanning, setScanning] = useState(false)
+  const [scanError, setScanError] = useState(false)
   const [progress, setProgress] = useState<ScanProgress | null>(null)
   const [filter, setFilter] = useState('')
   const [editing, setEditing] = useState<Record<string, string>>({})
@@ -31,6 +32,7 @@ export function GenreManager() {
   function scan() {
     esRef.current?.close()
     setScanning(true)
+    setScanError(false)
     setProgress({ folders: 0, artists: 0, tracks: 0, genres: 0, current: '' })
     setGenres([])
     setNormalizePreview(null)
@@ -54,6 +56,7 @@ export function GenreManager() {
     es.onerror = () => {
       setScanning(false)
       setProgress(null)
+      setScanError(true)
       es.close()
     }
   }
@@ -244,8 +247,17 @@ export function GenreManager() {
         </div>
       )}
 
+      {/* Error state */}
+      {!scanning && scanError && genres.length === 0 && (
+        <div style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--muted)', fontSize: '14px' }}>
+          <div style={{ fontSize: '28px', marginBottom: '12px' }}>⚠️</div>
+          <p style={{ color: '#ef4444', marginBottom: '8px' }}>Scan connection dropped.</p>
+          <p style={{ fontSize: '12px' }}>Server may need a restart — run <code style={{ background: 'var(--surface)', padding: '2px 5px', borderRadius: '3px' }}>dev.sh</code> then try again.</p>
+        </div>
+      )}
+
       {/* Empty state */}
-      {!scanning && genres.length === 0 && (
+      {!scanning && !scanError && genres.length === 0 && (
         <div style={{ padding: '60px 16px', textAlign: 'center', color: 'var(--muted)', fontSize: '14px' }}>
           <div style={{ fontSize: '32px', marginBottom: '12px' }}>🏷</div>
           <p>Scan your library to see all genre tags.</p>

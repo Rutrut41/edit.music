@@ -67,9 +67,14 @@ genresRouter.get('/scan', async (_req, res) => {
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
   res.flushHeaders()
 
   const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`)
+
+  // Keep the connection alive through Vite proxy / nginx
+  const ping = setInterval(() => res.write(': ping\n\n'), 15_000)
+  res.on('close', () => clearInterval(ping))
 
   const counts = new Map<string, number>()
   let folders = 0, artists = 0, tracks = 0, current = ''
