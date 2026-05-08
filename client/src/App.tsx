@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { FileBrowser } from './components/FileBrowser.js'
 import { TagEditor } from './components/TagEditor.js'
 import { Player } from './components/Player.js'
+import { SearchBar } from './components/SearchBar.js'
 import { useQueue } from './hooks/useQueue.js'
 
 export type Location = 'music' | 'recycle'
@@ -38,6 +39,12 @@ export function App() {
       </nav>
 
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <SearchBar
+          location={activeLocation}
+          onPlay={track => queue.playNow(track)}
+          onAddToQueue={track => queue.add(track)}
+          onSelect={setSelectedTrack}
+        />
         <FileBrowser
           location={activeLocation}
           onSelect={setSelectedTrack}
