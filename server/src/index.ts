@@ -4,6 +4,7 @@ import { filesRouter } from './routes/files.js'
 import { tagsRouter } from './routes/tags.js'
 import { audioRouter } from './routes/audio.js'
 import { searchRouter } from './routes/search.js'
+import { lookupRouter } from './routes/lookup.js'
 
 const app = express()
 const PORT = process.env.PORT ?? 3001
@@ -15,6 +16,7 @@ app.use('/api/files', filesRouter)
 app.use('/api/tags', tagsRouter)
 app.use('/api/audio', audioRouter)
 app.use('/api/search', searchRouter)
+app.use('/api/lookup', lookupRouter)
 
 app.listen(PORT, () => {
   console.log(`edit.music server on :${PORT}`)
