@@ -38,6 +38,35 @@ tagsRouter.get('/', async (req, res) => {
   }
 })
 
+tagsRouter.patch('/bulk', async (req, res) => {
+  try {
+    const { paths, genre, title, artist, album, year, track } = req.body
+    if (!Array.isArray(paths) || paths.length === 0) {
+      res.status(400).json({ error: 'paths required' }); return
+    }
+    let changed = 0
+    await Promise.all(paths.map(async (rel: string) => {
+      try {
+        const abs = safeResolve(MUSIC_ROOT, rel)
+        const file = TagFile.createFromPath(abs)
+        const t = file.tag
+        if (genre  !== undefined) t.genres     = genre  ? [genre]  : []
+        if (title  !== undefined) t.title       = title  || ''
+        if (artist !== undefined) t.performers  = artist ? [artist] : []
+        if (album  !== undefined) t.album       = album  || ''
+        if (year   !== undefined) t.year        = Number(year)  || 0
+        if (track  !== undefined) t.track       = Number(track) || 0
+        file.save()
+        file.dispose()
+        changed++
+      } catch {}
+    }))
+    res.json({ ok: true, changed })
+  } catch (e: any) {
+    res.status(400).json({ error: e.message })
+  }
+})
+
 tagsRouter.patch('/', async (req, res) => {
   try {
     const { path: rel } = req.query as Record<string, string>
