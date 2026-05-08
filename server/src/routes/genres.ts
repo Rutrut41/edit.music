@@ -3,7 +3,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { parseFile } from 'music-metadata'
 import { File as TagFile } from 'node-taglib-sharp'
-import { MUSIC_ROOT, safeResolve } from '../lib/roots.js'
+import { MUSIC_ROOT } from '../lib/roots.js'
 
 export const genresRouter = Router()
 
@@ -48,6 +48,7 @@ async function scanGenres(dir: string, counts: Map<string, number>) {
 let genreCache: { data: { genre: string; count: number }[]; ts: number } | null = null
 const GENRE_TTL = 30 * 60 * 1000
 
+// Cached read — used internally and for the normalize dry-run
 genresRouter.get('/', async (_req, res) => {
   if (genreCache && Date.now() - genreCache.ts < GENRE_TTL) {
     res.json(genreCache.data); return
@@ -59,6 +60,58 @@ genresRouter.get('/', async (_req, res) => {
     .sort((a, b) => b.count - a.count)
   genreCache = { data, ts: Date.now() }
   res.json(data)
+})
+
+// SSE live scan — streams progress events then a final 'done' with results
+genresRouter.get('/scan', async (_req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.flushHeaders()
+
+  const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`)
+
+  const counts = new Map<string, number>()
+  let folders = 0, artists = 0, tracks = 0, current = ''
+
+  async function walk(dir: string, depth: number) {
+    let entries
+    try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const abs = path.join(dir, e.name)
+      if (e.isDirectory()) {
+        folders++
+        if (depth === 0) {
+          artists++
+          current = e.name
+          send({ type: 'progress', folders, artists, tracks, genres: counts.size, current })
+        }
+        await walk(abs, depth + 1)
+      } else {
+        const ext = path.extname(e.name).toLowerCase()
+        if (!AUDIO_EXTS.has(ext)) continue
+        tracks++
+        try {
+          const { common } = await parseFile(abs, { skipCovers: true, duration: false })
+          const genre = common.genre?.[0]
+          if (genre) counts.set(genre, (counts.get(genre) ?? 0) + 1)
+        } catch {}
+        if (tracks % 200 === 0) {
+          send({ type: 'progress', folders, artists, tracks, genres: counts.size, current })
+        }
+      }
+    }
+  }
+
+  await walk(MUSIC_ROOT, 0)
+
+  const data = Array.from(counts.entries())
+    .map(([genre, count]) => ({ genre, count }))
+    .sort((a, b) => b.count - a.count)
+
+  genreCache = { data, ts: Date.now() }
+  send({ type: 'done', data, folders, artists, tracks, genres: counts.size })
+  res.end()
 })
 
 genresRouter.delete('/cache', (_req, res) => {

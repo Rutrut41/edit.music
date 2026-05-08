@@ -11,6 +11,12 @@
   --safe-bottom: env(safe-area-inset-bottom);
 }
 
+@keyframes scan-slide {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(150%); }
+  100% { transform: translateX(150%); }
+}
+
 html, body, #root {
   height: 100%;
   background: var(--bg);
