@@ -25,7 +25,8 @@ export function FileBrowser({ location, selectedPath, onSelect, onPlay, onAddToQ
     setLoading(true)
     fetch(`/api/files/${location}?path=${encodeURIComponent(currentPath || '.')}`)
       .then(r => r.json())
-      .then(setEntries)
+      .then(data => setEntries(Array.isArray(data) ? data : []))
+      .catch(() => setEntries([]))
       .finally(() => setLoading(false))
   }, [location, currentPath])
 
