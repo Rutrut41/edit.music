@@ -38,7 +38,13 @@ export function GenreManager() {
     setNormalizePreview(null)
     setNormalizeDone(false)
 
-    const es = new EventSource('/api/genres/scan')
+    // Bypass the Vite proxy for SSE — it can't hold long-running streams.
+    // In production (Docker) the client is served by Express on :3001 so relative URL works.
+    const isDev = window.location.port === '5173'
+    const scanUrl = isDev
+      ? `http://${window.location.hostname}:3001/api/genres/scan`
+      : '/api/genres/scan'
+    const es = new EventSource(scanUrl)
     esRef.current = es
 
     es.onmessage = e => {
