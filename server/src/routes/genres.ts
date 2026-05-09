@@ -24,60 +24,22 @@ async function saveMap(map: Record<string, string>) {
   await fs.writeFile(MAP_PATH, JSON.stringify(map, null, 2))
 }
 
-// Walk entire library, collect all genre tag values with counts
-async function scanGenres(dir: string, counts: Map<string, number>) {
-  let entries
-  try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch { return }
-  for (const e of entries) {
-    const abs = path.join(dir, e.name)
-    if (e.isDirectory()) {
-      await scanGenres(abs, counts)
-    } else {
-      const ext = path.extname(e.name).toLowerCase()
-      if (!AUDIO_EXTS.has(ext)) continue
-      try {
-        const { common } = await parseFile(abs, { skipCovers: true, duration: false })
-        const genre = common.genre?.[0]
-        if (genre) counts.set(genre, (counts.get(genre) ?? 0) + 1)
-      } catch {}
-    }
-  }
+
+// Background scan state — polled by the client every second
+interface ScanState {
+  running: boolean
+  progress: { folders: number; artists: number; tracks: number; genres: number; current: string } | null
+  result: { genre: string; count: number }[] | null
+  error: string | null
 }
+let scanState: ScanState = { running: false, progress: null, result: null, error: null }
 
-// Cache the genre scan — expensive op
-let genreCache: { data: { genre: string; count: number }[]; ts: number } | null = null
-const GENRE_TTL = 30 * 60 * 1000
-
-// Cached read — used internally and for the normalize dry-run
-genresRouter.get('/', async (_req, res) => {
-  if (genreCache && Date.now() - genreCache.ts < GENRE_TTL) {
-    res.json(genreCache.data); return
-  }
-  const counts = new Map<string, number>()
-  await scanGenres(MUSIC_ROOT, counts)
-  const data = Array.from(counts.entries())
-    .map(([genre, count]) => ({ genre, count }))
-    .sort((a, b) => b.count - a.count)
-  genreCache = { data, ts: Date.now() }
-  res.json(data)
-})
-
-// SSE live scan — streams progress events then a final 'done' with results
-genresRouter.get('/scan', async (_req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream')
-  res.setHeader('Cache-Control', 'no-cache')
-  res.setHeader('Connection', 'keep-alive')
-  res.setHeader('X-Accel-Buffering', 'no')
-  res.flushHeaders()
-
-  const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`)
-
-  // Keep the connection alive through Vite proxy / nginx
-  const ping = setInterval(() => res.write(': ping\n\n'), 15_000)
-  res.on('close', () => clearInterval(ping))
+async function runScan() {
+  if (scanState.running) return
+  scanState = { running: true, progress: { folders: 0, artists: 0, tracks: 0, genres: 0, current: '' }, result: null, error: null }
 
   const counts = new Map<string, number>()
-  let folders = 0, artists = 0, tracks = 0, current = ''
+  const p = scanState.progress!
 
   async function walk(dir: string, depth: number) {
     let entries
@@ -85,42 +47,46 @@ genresRouter.get('/scan', async (_req, res) => {
     for (const e of entries) {
       const abs = path.join(dir, e.name)
       if (e.isDirectory()) {
-        folders++
-        if (depth === 0) {
-          artists++
-          current = e.name
-          send({ type: 'progress', folders, artists, tracks, genres: counts.size, current })
-        }
+        p.folders++
+        if (depth === 0) { p.artists++; p.current = e.name }
         await walk(abs, depth + 1)
       } else {
         const ext = path.extname(e.name).toLowerCase()
         if (!AUDIO_EXTS.has(ext)) continue
-        tracks++
+        p.tracks++
         try {
           const { common } = await parseFile(abs, { skipCovers: true, duration: false })
           const genre = common.genre?.[0]
-          if (genre) counts.set(genre, (counts.get(genre) ?? 0) + 1)
+          if (genre) { counts.set(genre, (counts.get(genre) ?? 0) + 1); p.genres = counts.size }
         } catch {}
-        if (tracks % 200 === 0) {
-          send({ type: 'progress', folders, artists, tracks, genres: counts.size, current })
-        }
       }
     }
   }
 
-  await walk(MUSIC_ROOT, 0)
+  try {
+    await walk(MUSIC_ROOT, 0)
+    const data = Array.from(counts.entries())
+      .map(([genre, count]) => ({ genre, count }))
+      .sort((a, b) => b.count - a.count)
+    scanState = { running: false, progress: null, result: data, error: null }
+  } catch (e: any) {
+    scanState = { running: false, progress: null, result: null, error: e.message }
+  }
+}
 
-  const data = Array.from(counts.entries())
-    .map(([genre, count]) => ({ genre, count }))
-    .sort((a, b) => b.count - a.count)
+// Start a background scan
+genresRouter.post('/scan', (_req, res) => {
+  runScan()  // fire and forget
+  res.json({ ok: true, already: scanState.running })
+})
 
-  genreCache = { data, ts: Date.now() }
-  send({ type: 'done', data, folders, artists, tracks, genres: counts.size })
-  res.end()
+// Poll scan progress / result
+genresRouter.get('/scan', (_req, res) => {
+  res.json(scanState)
 })
 
 genresRouter.delete('/cache', (_req, res) => {
-  genreCache = null
+  scanState = { running: false, progress: null, result: null, error: null }
   res.json({ ok: true })
 })
 
@@ -191,7 +157,7 @@ genresRouter.post('/normalize', async (req, res) => {
         } catch {}
       }))
     }
-    genreCache = null // bust cache after writes
+    scanState.result = null // bust cached result after writes
   }
 
   res.json({ changed, total, dry })

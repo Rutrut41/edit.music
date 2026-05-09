@@ -22,15 +22,15 @@ export function GenreManager() {
   const [normalizePreview, setNormalizePreview] = useState<{ changed: number; total: number } | null>(null)
   const [normalizing, setNormalizing] = useState(false)
   const [normalizeDone, setNormalizeDone] = useState(false)
-  const esRef = useRef<EventSource | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     fetch('/api/genres/map').then(r => r.json()).then(setMap).catch(() => {})
-    return () => esRef.current?.close()
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [])
 
   function scan() {
-    esRef.current?.close()
+    if (pollRef.current) clearInterval(pollRef.current)
     setScanning(true)
     setScanError(false)
     setProgress({ folders: 0, artists: 0, tracks: 0, genres: 0, current: '' })
@@ -38,33 +38,33 @@ export function GenreManager() {
     setNormalizePreview(null)
     setNormalizeDone(false)
 
-    // Bypass the Vite proxy for SSE — it can't hold long-running streams.
-    // In production (Docker) the client is served by Express on :3001 so relative URL works.
-    const isDev = window.location.port === '5173'
-    const scanUrl = isDev
-      ? `http://${window.location.hostname}:3001/api/genres/scan`
-      : '/api/genres/scan'
-    const es = new EventSource(scanUrl)
-    esRef.current = es
+    fetch('/api/genres/scan', { method: 'POST' }).catch(() => {})
 
-    es.onmessage = e => {
-      const msg = JSON.parse(e.data)
-      if (msg.type === 'progress') {
-        setProgress({ folders: msg.folders, artists: msg.artists, tracks: msg.tracks, genres: msg.genres, current: msg.current })
-      } else if (msg.type === 'done') {
-        setGenres(Array.isArray(msg.data) ? msg.data : [])
-        setProgress(null)
+    pollRef.current = setInterval(async () => {
+      try {
+        const state = await fetch('/api/genres/scan').then(r => r.json())
+        if (state.progress) setProgress(state.progress)
+        if (!state.running) {
+          clearInterval(pollRef.current!)
+          pollRef.current = null
+          if (state.result) {
+            setGenres(state.result)
+            setProgress(null)
+            setScanning(false)
+          } else {
+            setProgress(null)
+            setScanning(false)
+            setScanError(true)
+          }
+        }
+      } catch {
+        clearInterval(pollRef.current!)
+        pollRef.current = null
         setScanning(false)
-        es.close()
+        setProgress(null)
+        setScanError(true)
       }
-    }
-
-    es.onerror = () => {
-      setScanning(false)
-      setProgress(null)
-      setScanError(true)
-      es.close()
-    }
+    }, 1000)
   }
 
   async function saveMapping(variant: string, canonical: string) {
@@ -101,7 +101,7 @@ export function GenreManager() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dry: false }),
     })
-    await fetch('/api/genres/cache', { method: 'DELETE' })
+    await fetch('/api/genres/cache', { method: 'DELETE' })  // bust result cache
     setNormalizePreview(null)
     setNormalizeDone(true)
     setNormalizing(false)
