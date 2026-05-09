@@ -12,8 +12,10 @@ async function getMusicSectionId(): Promise<string | null> {
     })
     const data = await res.json() as any
     const dirs: any[] = data?.MediaContainer?.Directory ?? []
-    const section = dirs.find(d => d.type === 'artist') // Plex music libraries have type=artist
-    musicSectionId = section?.key ?? null
+    const artistDirs = dirs.filter(d => d.type === 'artist')
+    // Prefer a section whose title contains "music" over e.g. "audiobooks"
+    const section = artistDirs.find(d => /music/i.test(d.title)) ?? artistDirs[0]
+    musicSectionId = section?.key ?? null as string | null
     if (musicSectionId) console.log(`[plex] music library section: ${musicSectionId}`)
     else console.warn('[plex] no music library found — check PLEX_URL and PLEX_TOKEN')
   } catch (e: any) {

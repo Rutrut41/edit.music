@@ -8,8 +8,7 @@ sleep 1
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 cd "$ROOT/server" && \
-  MUSIC_ROOT=/mnt/user/music RECYCLE_ROOT=/mnt/user/music/.recycle \
-  node --import tsx/esm --watch src/index.ts &
+  node --env-file=.env --import tsx/esm --watch src/index.ts &
 
 sleep 3
 
