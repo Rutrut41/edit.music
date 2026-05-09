@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { TrackRef } from '../App.js'
 
 interface Tags {
@@ -7,7 +7,7 @@ interface Tags {
   album: string | null
   year: number | null
   track: number | null
-  genre: string | null
+  genres: string[]
   duration: number | null
   bitrate: number | null
   codec: string | null
@@ -36,6 +36,8 @@ export function TagEditor({ track, onClose }: Props) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [suggesting, setSuggesting] = useState(false)
   const [showSuggestions, setShowSuggestions] = useState(false)
+  const [genreInput, setGenreInput] = useState('')
+  const genreInputRef = useRef<HTMLInputElement>(null)
   const isRecycle = track.location === 'recycle'
 
   useEffect(() => {
@@ -43,13 +45,30 @@ export function TagEditor({ track, onClose }: Props) {
     setSaved(false)
     setSuggestions([])
     setShowSuggestions(false)
+    setGenreInput('')
     fetch(`/api/tags?path=${encodeURIComponent(track.path)}&location=${track.location}`)
       .then(r => r.json())
-      .then(setTags)
+      .then(data => setTags({ ...data, genres: Array.isArray(data.genres) ? data.genres : [] }))
   }, [track.path, track.location])
 
   function update(field: keyof Tags, value: string) {
     setTags(t => t ? { ...t, [field]: value || null } : t)
+    setSaved(false)
+  }
+
+  function addGenre(raw: string) {
+    const trimmed = raw.trim()
+    if (!trimmed || !tags) return
+    // Split on commas so "Drum & Bass, Electronic" adds two
+    const toAdd = trimmed.split(',').map(g => g.trim()).filter(g => g && !tags.genres.includes(g))
+    if (!toAdd.length) return
+    setTags(t => t ? { ...t, genres: [...t.genres, ...toAdd] } : t)
+    setGenreInput('')
+    setSaved(false)
+  }
+
+  function removeGenre(i: number) {
+    setTags(t => t ? { ...t, genres: t.genres.filter((_, idx) => idx !== i) } : t)
     setSaved(false)
   }
 
@@ -59,7 +78,7 @@ export function TagEditor({ track, onClose }: Props) {
     await fetch(`/api/tags?path=${encodeURIComponent(track.path)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: tags.title, artist: tags.artist, album: tags.album, year: tags.year, track: tags.track, genre: tags.genre }),
+      body: JSON.stringify({ title: tags.title, artist: tags.artist, album: tags.album, year: tags.year, track: tags.track, genres: tags.genres }),
     })
     setSaving(false)
     setSaved(true)
@@ -69,15 +88,12 @@ export function TagEditor({ track, onClose }: Props) {
     if (!tags) return
     setSuggesting(true)
     setShowSuggestions(true)
-    // Use filename as fallback query if no tags filled
     const bare = track.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ')
     const params = new URLSearchParams()
     if (tags.title) params.set('title', tags.title)
     if (tags.artist) params.set('artist', tags.artist)
     if (!tags.title && !tags.artist) params.set('q', bare)
-    const data = await fetch(`/api/lookup?${params}`)
-      .then(r => r.json())
-      .catch(() => [])
+    const data = await fetch(`/api/lookup?${params}`).then(r => r.json()).catch(() => [])
     setSuggestions(Array.isArray(data) ? data : [])
     setSuggesting(false)
   }
@@ -99,7 +115,7 @@ export function TagEditor({ track, onClose }: Props) {
     return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
   }
 
-  const field = (label: string, key: 'title' | 'artist' | 'album' | 'genre', type = 'text') => (
+  const field = (label: string, key: 'title' | 'artist' | 'album', type = 'text') => (
     <div style={{ marginBottom: '10px' }}>
       <label style={{ fontSize: '11px', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</label>
       <input
@@ -164,9 +180,7 @@ export function TagEditor({ track, onClose }: Props) {
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             >
               <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ fontSize: '13px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {s.title}
-                </p>
+                <p style={{ fontSize: '13px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</p>
                 <p style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '2px' }}>
                   {[s.artist, s.album, s.year].filter(Boolean).join(' · ')}
                   {s.track ? ` · #${s.track}` : ''}
@@ -191,7 +205,57 @@ export function TagEditor({ track, onClose }: Props) {
             {field('Title', 'title')}
             {field('Artist', 'artist')}
             {field('Album', 'album')}
-            {field('Genre', 'genre')}
+
+            {/* Multi-genre chip input */}
+            <div style={{ marginBottom: '10px' }}>
+              <label style={{ fontSize: '11px', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Genre</label>
+              <div
+                onClick={() => genreInputRef.current?.focus()}
+                style={{
+                  display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center',
+                  marginTop: '4px', padding: '6px 8px', minHeight: '38px',
+                  background: isRecycle ? 'transparent' : 'var(--bg)',
+                  border: '1px solid var(--border)', borderRadius: '4px',
+                  opacity: isRecycle ? 0.6 : 1, cursor: isRecycle ? 'default' : 'text',
+                }}
+              >
+                {tags.genres.map((g, i) => (
+                  <span key={i} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: '5px',
+                    background: 'var(--surface)', border: '1px solid var(--border)',
+                    borderRadius: '3px', padding: '2px 7px', fontSize: '13px',
+                  }}>
+                    {g}
+                    {!isRecycle && (
+                      <button
+                        onClick={e => { e.stopPropagation(); removeGenre(i) }}
+                        style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', padding: 0, fontSize: '12px', lineHeight: 1 }}
+                      >×</button>
+                    )}
+                  </span>
+                ))}
+                {!isRecycle && (
+                  <input
+                    ref={genreInputRef}
+                    value={genreInput}
+                    onChange={e => setGenreInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addGenre(genreInput) }
+                      if (e.key === 'Backspace' && !genreInput && tags.genres.length > 0) removeGenre(tags.genres.length - 1)
+                    }}
+                    onBlur={() => { if (genreInput.trim()) addGenre(genreInput) }}
+                    placeholder={tags.genres.length === 0 ? 'Add genre…' : '+'}
+                    style={{
+                      background: 'none', border: 'none', outline: 'none',
+                      color: 'var(--text)', fontSize: '13px', minWidth: '80px', flex: 1,
+                      padding: '2px 2px',
+                    }}
+                  />
+                )}
+              </div>
+              {!isRecycle && <p style={{ fontSize: '10px', color: 'var(--muted)', marginTop: '3px' }}>Enter or comma to add · backspace to remove</p>}
+            </div>
+
             <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
               {(['year', 'track'] as const).map(key => (
                 <div key={key} style={{ flex: 1 }}>

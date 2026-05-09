@@ -68,7 +68,7 @@ export function GenreManager() {
   }
 
   async function saveMapping(variant: string, canonical: string) {
-    if (!canonical.trim()) return
+    if (!canonical.trim()) { await removeMapping(variant); return }
     await fetch('/api/genres/map', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },

@@ -3,6 +3,7 @@ import { parseFile } from 'music-metadata'
 import type { IPicture } from 'music-metadata'
 import { File as TagFile } from 'node-taglib-sharp'
 import { MUSIC_ROOT, RECYCLE_ROOT, safeResolve } from '../lib/roots.js'
+import { plexRefresh } from '../lib/plex.js'
 
 function selectCover(pictures?: IPicture[]): IPicture | null {
   if (!pictures?.length) return null
@@ -22,15 +23,15 @@ tagsRouter.get('/', async (req, res) => {
     const { common, format } = await parseFile(abs)
     const cover = selectCover(common.picture)
     res.json({
-      title:    common.title   ?? null,
-      artist:   common.artist  ?? null,
-      album:    common.album   ?? null,
-      year:     common.year    ?? null,
-      track:    common.track?.no ?? null,
-      genre:    common.genre?.[0] ?? null,
-      duration: format.duration ?? null,
-      bitrate:  format.bitrate  ?? null,
-      codec:    format.codec    ?? null,
+      title:    common.title        ?? null,
+      artist:   common.artist       ?? null,
+      album:    common.album        ?? null,
+      year:     common.year         ?? null,
+      track:    common.track?.no    ?? null,
+      genres:   common.genre        ?? [],
+      duration: format.duration     ?? null,
+      bitrate:  format.bitrate      ?? null,
+      codec:    format.codec        ?? null,
       cover:    cover ? `data:${cover.format};base64,${Buffer.from(cover.data).toString('base64')}` : null,
     })
   } catch (e: any) {
@@ -40,27 +41,33 @@ tagsRouter.get('/', async (req, res) => {
 
 tagsRouter.patch('/bulk', async (req, res) => {
   try {
-    const { paths, genre, title, artist, album, year, track } = req.body
+    const { paths, genres, genre, title, artist, album, year, track } = req.body
     if (!Array.isArray(paths) || paths.length === 0) {
       res.status(400).json({ error: 'paths required' }); return
     }
+    // Accept either genres[] or legacy single genre string
+    const genreValue: string[] | undefined = genres !== undefined
+      ? (Array.isArray(genres) ? genres : [genres].filter(Boolean))
+      : genre !== undefined ? (genre ? [genre] : []) : undefined
+
     let changed = 0
     await Promise.all(paths.map(async (rel: string) => {
       try {
         const abs = safeResolve(MUSIC_ROOT, rel)
         const file = TagFile.createFromPath(abs)
         const t = file.tag
-        if (genre  !== undefined) t.genres     = genre  ? [genre]  : []
-        if (title  !== undefined) t.title       = title  || ''
-        if (artist !== undefined) t.performers  = artist ? [artist] : []
-        if (album  !== undefined) t.album       = album  || ''
-        if (year   !== undefined) t.year        = Number(year)  || 0
-        if (track  !== undefined) t.track       = Number(track) || 0
+        if (genreValue !== undefined) t.genres    = genreValue
+        if (title  !== undefined) t.title         = title  || ''
+        if (artist !== undefined) t.performers    = artist ? [artist] : []
+        if (album  !== undefined) t.album         = album  || ''
+        if (year   !== undefined) t.year          = Number(year)  || 0
+        if (track  !== undefined) t.track         = Number(track) || 0
         file.save()
         file.dispose()
         changed++
       } catch {}
     }))
+    plexRefresh().catch(() => {})
     res.json({ ok: true, changed })
   } catch (e: any) {
     res.status(400).json({ error: e.message })
@@ -75,16 +82,17 @@ tagsRouter.patch('/', async (req, res) => {
     const file = TagFile.createFromPath(abs)
     const t = file.tag
 
-    const { title, artist, album, year, track, genre } = req.body
-    if (title  !== undefined) t.title       = title  || ''
-    if (artist !== undefined) t.performers  = artist ? [artist] : []
-    if (album  !== undefined) t.album       = album  || ''
-    if (year   !== undefined) t.year        = Number(year) || 0
-    if (track  !== undefined) t.track       = Number(track) || 0
-    if (genre  !== undefined) t.genres      = genre  ? [genre] : []
+    const { title, artist, album, year, track, genres } = req.body
+    if (title   !== undefined) t.title      = title  || ''
+    if (artist  !== undefined) t.performers = artist ? [artist] : []
+    if (album   !== undefined) t.album      = album  || ''
+    if (year    !== undefined) t.year       = Number(year)  || 0
+    if (track   !== undefined) t.track      = Number(track) || 0
+    if (genres  !== undefined) t.genres     = Array.isArray(genres) ? genres : []
 
     file.save()
     file.dispose()
+    plexRefresh().catch(() => {})
     res.json({ ok: true })
   } catch (e: any) {
     res.status(400).json({ error: e.message })
