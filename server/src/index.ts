@@ -11,7 +11,7 @@ import { genresRouter } from './routes/genres.js'
 const app = express()
 const PORT = process.env.PORT ?? 3001
 
-app.use(cors())
+app.use(cors({ origin: /^https?:\/\/(localhost|127\.0\.0\.1|tokyo7\.local)(:\d+)?$/ }))
 app.use(express.json())
 
 app.use('/api/files', filesRouter)

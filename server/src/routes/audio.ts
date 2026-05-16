@@ -27,7 +27,8 @@ audioRouter.get('/stream', (req, res) => {
       '.opus': 'audio/ogg; codecs=opus',
     }
 
-    const mime = mimeMap[ext] ?? 'application/octet-stream'
+    const mime = mimeMap[ext]
+    if (!mime) { res.status(400).json({ error: 'Not an audio file' }); return }
     const range = req.headers.range
 
     if (range) {
