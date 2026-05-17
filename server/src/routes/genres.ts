@@ -24,7 +24,7 @@ async function savePhrases(phrases: string[]) {
 
 const DEFAULT_MAP: Record<string, string> = {}
 
-interface FileEntry { genre: string | null; mtime: number }
+interface FileEntry { genre: string | null; genres: string[]; mtime: number }
 
 interface CacheFile {
   scannedAt: string
@@ -118,13 +118,16 @@ async function runScan(incremental = false) {
           const mtime = stat.mtimeMs
           if (useIncremental && prevCache[abs] && mtime <= scannedAtMs) {
             // File unchanged — use cached genre, skip parseFile
-            genre = prevCache[abs].genre
-            newFileCache[abs] = prevCache[abs]
+            const prev = prevCache[abs]
+            genre = prev.genre
+            // back-fill genres array for old cache entries that predate this field
+            newFileCache[abs] = { ...prev, genres: prev.genres ?? (prev.genre ? [prev.genre] : []) }
           } else {
             // New or modified file — read metadata
             const { common } = await parseFile(abs, { skipCovers: true, duration: false })
-            genre = common.genre?.[0] ?? null
-            newFileCache[abs] = { genre, mtime }
+            const allGenres = common.genre ?? []
+            genre = allGenres[0] ?? null
+            newFileCache[abs] = { genre, genres: allGenres, mtime }
           }
         } catch {}
 
@@ -200,6 +203,34 @@ genresRouter.post('/map/prune', async (_req, res) => {
   }
   await saveMap(map)
   res.json({ ok: true, pruned: pruned.length, remaining: Object.keys(map).length, map })
+})
+
+// Co-occurrence matrix — which genre tokens share the same files
+// Requires a rescan to populate fileCache.genres; old single-genre entries are handled gracefully
+genresRouter.get('/cooccurrence', (_req, res) => {
+  const tokenCounts = new Map<string, number>()
+  const pairCounts  = new Map<string, number>()
+
+  for (const entry of Object.values(fileCache)) {
+    const genres = entry.genres?.length ? entry.genres : (entry.genre ? [entry.genre] : [])
+    if (!genres.length) continue
+    for (const g of genres) tokenCounts.set(g, (tokenCounts.get(g) ?? 0) + 1)
+    for (let i = 0; i < genres.length; i++) {
+      for (let j = i + 1; j < genres.length; j++) {
+        const key = [genres[i], genres[j]].sort().join('\x00')
+        pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1)
+      }
+    }
+  }
+
+  res.json({
+    tokens: Array.from(tokenCounts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count),
+    cooccurrence: Array.from(pairCounts.entries())
+      .map(([key, count]) => { const [a, b] = key.split('\x00'); return { a, b, count } })
+      .sort((a, b) => b.count - a.count),
+  })
 })
 
 genresRouter.get('/phrases', async (_req, res) => {
@@ -344,7 +375,7 @@ async function runTokenize(dry: boolean) {
           if (n <= 0) countMap.delete(oldGenre); else countMap.set(oldGenre, n)
         }
         for (const g of newGenres) countMap.set(g, (countMap.get(g) ?? 0) + 1)
-        if (fileCache[abs]) fileCache[abs] = { ...fileCache[abs], genre: newGenres[0] ?? null }
+        if (fileCache[abs]) fileCache[abs] = { ...fileCache[abs], genre: newGenres[0] ?? null, genres: newGenres }
       }
       const data = Array.from(countMap.entries()).map(([genre, count]) => ({ genre, count })).sort((a, b) => b.count - a.count)
       scanState.result = data
@@ -447,7 +478,10 @@ async function runNormalize(dry: boolean) {
           if (n <= 0) countMap.delete(oldGenre); else countMap.set(oldGenre, n)
         }
         if (canonical !== '') countMap.set(canonical, (countMap.get(canonical) ?? 0) + 1)
-        if (fileCache[abs]) fileCache[abs] = { ...fileCache[abs], genre: canonical === '' ? null : canonical }
+        if (fileCache[abs]) {
+          const g = canonical === '' ? null : canonical
+          fileCache[abs] = { ...fileCache[abs], genre: g, genres: g ? [g] : [] }
+        }
       }
       const data = Array.from(countMap.entries()).map(([genre, count]) => ({ genre, count })).sort((a, b) => b.count - a.count)
       scanState.result = data
