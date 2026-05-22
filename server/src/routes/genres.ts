@@ -146,7 +146,7 @@ async function runScan(incremental = false) {
   }
 
   // Batch fs.stat calls with concurrency limit
-  async function statFilesInBatches(paths: string[], concurrency = 8) {
+  async function statFilesInBatches(paths: string[], concurrency = 16) {
     const statResults: Array<{ abs: string; mtime: number }> = []
     for (let i = 0; i < paths.length; i += concurrency) {
       const batch = paths.slice(i, i + concurrency)
@@ -166,7 +166,7 @@ async function runScan(incremental = false) {
   }
 
   // Batch parseFile calls with concurrency limit
-  async function parseFilesInBatches(files: FileToParse[], concurrency = 8) {
+  async function parseFilesInBatches(files: FileToParse[], concurrency = 16) {
     const parseResults: Array<{ abs: string; mtime: number; genre: string | null; genres: string[] }> = []
     for (let i = 0; i < files.length; i += concurrency) {
       const batch = files.slice(i, i + concurrency)
