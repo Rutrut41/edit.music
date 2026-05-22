@@ -400,7 +400,7 @@ async function runTokenize(dry: boolean) {
   tokenizeState = { running: true, dry, phase: 'scanning', scanned: 0, toChange: 0, written: 0, failed: 0, dryResult: null, done: false, error: null }
 
   const examples: { original: string; tokens: string[] }[] = []
-  const toChange: { abs: string; newGenres: string[] }[] = []
+  const filePaths: string[] = []
 
   async function walk(dir: string) {
     let entries
@@ -411,28 +411,75 @@ async function runTokenize(dry: boolean) {
       const ext = path.extname(e.name).toLowerCase()
       if (!AUDIO_EXTS.has(ext)) continue
       tokenizeState.scanned++
-      try {
-        const { common } = await parseFile(abs, { skipCovers: true, duration: false })
-        const genres = common.genre ?? []
-        if (genres.length === 0) continue
-        const allTokens = [...new Set(genres.flatMap(g => tokenizeGenre(g, phrases)))]
-        // order-independent set comparison
-        const tokSet = new Set(allTokens.map(t => t.toLowerCase()))
-        const genSet = new Set(genres.map(t => t.toLowerCase()))
-        const same = tokSet.size === genSet.size && [...genSet].every(g => tokSet.has(g))
-        if (!same) {
-          tokenizeState.toChange++
-          if (dry && examples.length < 8) examples.push({ original: genres.join(' / '), tokens: allTokens })
-          else if (!dry) toChange.push({ abs, newGenres: allTokens })
-        }
-      } catch {}
+      filePaths.push(abs)
     }
   }
 
-  const written: { abs: string; newGenres: string[] }[] = []
+  // Batch parseFile calls with concurrency limit
+  async function parseFilesInBatches(paths: string[], concurrency = 8) {
+    const parseResults: Array<{ abs: string; genres: string[]; allTokens: string[]; needsChange: boolean }> = []
+    for (let i = 0; i < paths.length; i += concurrency) {
+      const batch = paths.slice(i, i + concurrency)
+      const results = await Promise.all(
+        batch.map(async (abs) => {
+          try {
+            const { common } = await parseFile(abs, { skipCovers: true, duration: false })
+            const genres = common.genre ?? []
+            if (genres.length === 0) return { abs, genres: [], allTokens: [], needsChange: false }
+            const allTokens = [...new Set(genres.flatMap(g => tokenizeGenre(g, phrases)))]
+            const tokSet = new Set(allTokens.map(t => t.toLowerCase()))
+            const genSet = new Set(genres.map(t => t.toLowerCase()))
+            const same = tokSet.size === genSet.size && [...genSet].every(g => tokSet.has(g))
+            return { abs, genres, allTokens, needsChange: !same }
+          } catch {
+            return { abs, genres: [], allTokens: [], needsChange: false }
+          }
+        })
+      )
+      parseResults.push(...results)
+    }
+    return parseResults
+  }
+
+  // Batch TagFile writes with concurrency limit
+  async function writeFilesInBatches(files: Array<{ abs: string; newGenres: string[] }>, concurrency = 8) {
+    const written: { abs: string; newGenres: string[] }[] = []
+    for (let i = 0; i < files.length; i += concurrency) {
+      const batch = files.slice(i, i + concurrency)
+      const results = await Promise.all(
+        batch.map(async (f) => {
+          try {
+            const file = TagFile.createFromPath(f.abs)
+            file.tag.genres = f.newGenres
+            file.save()
+            file.dispose()
+            tokenizeState.written++
+            return { abs: f.abs, newGenres: f.newGenres, success: true }
+          } catch (e: any) {
+            tokenizeState.failed++
+            console.error(`[tokenize] write failed: ${f.abs} — ${e.message}`)
+            return { abs: f.abs, newGenres: f.newGenres, success: false }
+          }
+        })
+      )
+      written.push(...results.filter(r => r.success))
+    }
+    return written
+  }
 
   try {
     await walk(MUSIC_ROOT)
+    const parseResults = await parseFilesInBatches(filePaths)
+
+    // Build toChange from parse results
+    const toChange: { abs: string; newGenres: string[] }[] = []
+    for (const { abs, genres, allTokens, needsChange } of parseResults) {
+      if (needsChange) {
+        tokenizeState.toChange++
+        if (dry && examples.length < 8) examples.push({ original: genres.join(' / '), tokens: allTokens })
+        else if (!dry) toChange.push({ abs, newGenres: allTokens })
+      }
+    }
 
     if (dry) {
       tokenizeState = { ...tokInit, dry: true, scanned: tokenizeState.scanned, toChange: tokenizeState.toChange, dryResult: { changed: tokenizeState.toChange, total: tokenizeState.scanned, examples } }
@@ -440,20 +487,8 @@ async function runTokenize(dry: boolean) {
     }
 
     tokenizeState.phase = 'writing'
-    for (const { abs, newGenres } of toChange) {
-      try {
-        const file = TagFile.createFromPath(abs)
-        file.tag.genres = newGenres
-        file.save()
-        file.dispose()
-        tokenizeState.written++
-        written.push({ abs, newGenres })
-      } catch (e: any) {
-        tokenizeState.failed++
-        console.error(`[tokenize] write failed: ${abs} — ${e.message}`)
-      }
-      await new Promise(resolve => setImmediate(resolve))
-    }
+    const written = await writeFilesInBatches(toChange)
+
     // Update in-memory genre counts only for files that were actually written
     if (scanState.result) {
       const countMap = new Map(scanState.result.map(r => [r.genre, r.count]))
@@ -516,7 +551,7 @@ async function runNormalize(dry: boolean) {
   }
 
   normalizeState = { running: true, dry, phase: 'scanning', scanned: 0, toChange: 0, written: 0, dryResult: null, done: false, error: null }
-  const toChange: { abs: string; canonical: string }[] = []
+  const filePaths: string[] = []
 
   async function walk(dir: string) {
     let entries
@@ -527,19 +562,64 @@ async function runNormalize(dry: boolean) {
       const ext = path.extname(e.name).toLowerCase()
       if (!AUDIO_EXTS.has(ext)) continue
       normalizeState.scanned++
-      try {
-        const { common } = await parseFile(abs, { skipCovers: true, duration: false })
-        const genre = common.genre?.[0]
-        if (!genre) continue
-        const canonical = map[genre.trim().toLowerCase()]
-        // canonical === '' means discard; treat as a change even though it's empty
-        if (canonical !== undefined && canonical !== genre) { toChange.push({ abs, canonical }); normalizeState.toChange++ }
-      } catch {}
+      filePaths.push(abs)
     }
+  }
+
+  // Batch parseFile calls with concurrency limit
+  async function parseFilesInBatches(paths: string[], concurrency = 8) {
+    const parseResults: Array<{ abs: string; canonical: string | null }> = []
+    for (let i = 0; i < paths.length; i += concurrency) {
+      const batch = paths.slice(i, i + concurrency)
+      const results = await Promise.all(
+        batch.map(async (abs) => {
+          try {
+            const { common } = await parseFile(abs, { skipCovers: true, duration: false })
+            const genre = common.genre?.[0]
+            if (!genre) return { abs, canonical: null }
+            const canonical = map[genre.trim().toLowerCase()]
+            if (canonical !== undefined && canonical !== genre) return { abs, canonical }
+            return { abs, canonical: null }
+          } catch {
+            return { abs, canonical: null }
+          }
+        })
+      )
+      parseResults.push(...results.filter(r => r.canonical !== null))
+    }
+    return parseResults
+  }
+
+  // Batch TagFile writes with concurrency limit
+  async function writeFilesInBatches(files: Array<{ abs: string; canonical: string }>, concurrency = 8) {
+    const written: { abs: string; canonical: string }[] = []
+    for (let i = 0; i < files.length; i += concurrency) {
+      const batch = files.slice(i, i + concurrency)
+      const results = await Promise.all(
+        batch.map(async (f) => {
+          try {
+            const file = TagFile.createFromPath(f.abs)
+            file.tag.genres = f.canonical === '' ? [] : [f.canonical]
+            file.save()
+            file.dispose()
+            normalizeState.written++
+            return { abs: f.abs, canonical: f.canonical, success: true }
+          } catch {
+            return { abs: f.abs, canonical: f.canonical, success: false }
+          }
+        })
+      )
+      written.push(...results.filter(r => r.success).map(r => ({ abs: r.abs, canonical: r.canonical })))
+    }
+    return written
   }
 
   try {
     await walk(MUSIC_ROOT)
+    const parseResults = await parseFilesInBatches(filePaths)
+
+    normalizeState.toChange = parseResults.length
+    const toChange = parseResults
 
     if (dry) {
       normalizeState = { ...normInit, dry: true, scanned: normalizeState.scanned, toChange: toChange.length, dryResult: { changed: toChange.length, total: normalizeState.scanned } }
@@ -547,20 +627,12 @@ async function runNormalize(dry: boolean) {
     }
 
     normalizeState.phase = 'writing'
-    for (const { abs, canonical } of toChange) {
-      try {
-        const file = TagFile.createFromPath(abs)
-        file.tag.genres = canonical === '' ? [] : [canonical]
-        file.save()
-        file.dispose()
-        normalizeState.written++
-      } catch {}
-      await new Promise(resolve => setImmediate(resolve))
-    }
+    const written = await writeFilesInBatches(toChange)
+
     // Update in-memory genre counts and file cache — no rescan needed
     if (scanState.result) {
       const countMap = new Map(scanState.result.map(r => [r.genre, r.count]))
-      for (const { abs, canonical } of toChange) {
+      for (const { abs, canonical } of written) {
         const oldGenre = fileCache[abs]?.genre
         if (oldGenre) {
           const n = (countMap.get(oldGenre) ?? 1) - 1
