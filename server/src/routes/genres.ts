@@ -118,7 +118,7 @@ async function runScan(incremental = false) {
     useCache: boolean
     prev?: FileEntry
   }
-  const filesToParse: FileToParse[] = []
+  const filePaths: string[] = []
 
   async function walk(dir: string) {
     let entries
@@ -140,22 +140,33 @@ async function runScan(incremental = false) {
           const artist = path.basename(artistDir)
           if (!artistSet.has(artistDir)) { artistSet.add(artistDir); p.artists = artistSet.size; p.current = artist }
         }
-
-        try {
-          const stat = await fs.stat(abs)
-          const mtime = stat.mtimeMs
-          if (useIncremental && prevCache[abs] && mtime <= scannedAtMs) {
-            filesToParse.push({ abs, mtime, useCache: true, prev: prevCache[abs] })
-          } else {
-            filesToParse.push({ abs, mtime, useCache: false })
-          }
-        } catch {}
+        filePaths.push(abs)
       }
     }
   }
 
+  // Batch fs.stat calls with concurrency limit
+  async function statFilesInBatches(paths: string[], concurrency = 8) {
+    const statResults: Array<{ abs: string; mtime: number }> = []
+    for (let i = 0; i < paths.length; i += concurrency) {
+      const batch = paths.slice(i, i + concurrency)
+      const results = await Promise.all(
+        batch.map(async (abs) => {
+          try {
+            const stat = await fs.stat(abs)
+            return { abs, mtime: stat.mtimeMs }
+          } catch {
+            return { abs, mtime: 0 }
+          }
+        })
+      )
+      statResults.push(...results)
+    }
+    return statResults
+  }
+
   // Batch parseFile calls with concurrency limit
-  async function parseFilesInBatches(files: FileToParse[], concurrency = 4) {
+  async function parseFilesInBatches(files: FileToParse[], concurrency = 8) {
     const parseResults: Array<{ abs: string; mtime: number; genre: string | null; genres: string[] }> = []
     for (let i = 0; i < files.length; i += concurrency) {
       const batch = files.slice(i, i + concurrency)
@@ -182,6 +193,17 @@ async function runScan(incremental = false) {
 
   try {
     await walk(MUSIC_ROOT)
+    const statResults = await statFilesInBatches(filePaths)
+
+    // Build filesToParse from stat results with incremental check
+    const filesToParse: FileToParse[] = statResults.map(({ abs, mtime }) => {
+      if (useIncremental && prevCache[abs] && mtime <= scannedAtMs) {
+        return { abs, mtime, useCache: true, prev: prevCache[abs] }
+      } else {
+        return { abs, mtime, useCache: false }
+      }
+    })
+
     const parseResults = await parseFilesInBatches(filesToParse)
 
     // Phase 3: Process results sequentially (no race conditions)
