@@ -35,6 +35,9 @@ interface CacheFile {
 // Per-file genre + mtime — lives in memory, persisted in cache JSON
 let fileCache: Record<string, FileEntry> = {}
 
+// Inverted index: genre → Set of file paths (derived from fileCache after scan)
+let invertedIndex: Map<string, Set<string>> = new Map()
+
 async function loadScanCache(): Promise<CacheFile | null> {
   try { return JSON.parse(await fs.readFile(CACHE_PATH, 'utf8')) } catch { return null }
 }
@@ -42,6 +45,20 @@ async function loadScanCache(): Promise<CacheFile | null> {
 async function saveScanCache(data: { genre: string; count: number }[]) {
   const payload: CacheFile = { scannedAt: new Date().toISOString(), data, files: fileCache }
   await fs.writeFile(CACHE_PATH, JSON.stringify(payload)).catch(() => {})
+}
+
+// Build inverted index from fileCache (genre → Set<FilePath>)
+// Called after scan completes to ensure index is consistent with fileCache
+function buildInvertedIndex(cache: Record<string, FileEntry>): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>()
+  for (const [abs, entry] of Object.entries(cache)) {
+    const genres = entry.genres?.length ? entry.genres : (entry.genre ? [entry.genre] : [])
+    for (const genre of genres) {
+      if (!index.has(genre)) index.set(genre, new Set())
+      index.get(genre)!.add(abs)
+    }
+  }
+  return index
 }
 
 async function loadMap(): Promise<Record<string, string>> {
@@ -72,7 +89,10 @@ let scanState: ScanState = { running: false, progress: null, result: null, scann
   const cached = await loadScanCache()
   if (cached) {
     scanState = { running: false, progress: null, result: cached.data, scannedAt: cached.scannedAt, error: null }
-    if (cached.files) fileCache = cached.files
+    if (cached.files) {
+      fileCache = cached.files
+      invertedIndex = buildInvertedIndex(fileCache)
+    }
     console.log(`[genres] cache loaded: ${cached.data.length} genres, ${Object.keys(fileCache).length} files (scanned ${cached.scannedAt})`)
   }
 })()
@@ -90,6 +110,15 @@ async function runScan(incremental = false) {
   const artistSet = new Set<string>()
   const p = scanState.progress!
   const newFileCache: Record<string, FileEntry> = {}
+
+  // File to parse: either needs parsing or uses cache
+  interface FileToParse {
+    abs: string
+    mtime: number
+    useCache: boolean
+    prev?: FileEntry
+  }
+  const filesToParse: FileToParse[] = []
 
   async function walk(dir: string) {
     let entries
@@ -112,33 +141,57 @@ async function runScan(incremental = false) {
           if (!artistSet.has(artistDir)) { artistSet.add(artistDir); p.artists = artistSet.size; p.current = artist }
         }
 
-        let genre: string | null = null
         try {
           const stat = await fs.stat(abs)
           const mtime = stat.mtimeMs
           if (useIncremental && prevCache[abs] && mtime <= scannedAtMs) {
-            // File unchanged — use cached genre, skip parseFile
-            const prev = prevCache[abs]
-            genre = prev.genre
-            // back-fill genres array for old cache entries that predate this field
-            newFileCache[abs] = { ...prev, genres: prev.genres ?? (prev.genre ? [prev.genre] : []) }
+            filesToParse.push({ abs, mtime, useCache: true, prev: prevCache[abs] })
           } else {
-            // New or modified file — read metadata
-            const { common } = await parseFile(abs, { skipCovers: true, duration: false })
-            const allGenres = common.genre ?? []
-            genre = allGenres[0] ?? null
-            newFileCache[abs] = { genre, genres: allGenres, mtime }
+            filesToParse.push({ abs, mtime, useCache: false })
           }
         } catch {}
-
-        if (genre) { counts.set(genre, (counts.get(genre) ?? 0) + 1); p.genres = counts.size }
       }
     }
   }
 
+  // Batch parseFile calls with concurrency limit
+  async function parseFilesInBatches(files: FileToParse[], concurrency = 4) {
+    const parseResults: Array<{ abs: string; mtime: number; genre: string | null; genres: string[] }> = []
+    for (let i = 0; i < files.length; i += concurrency) {
+      const batch = files.slice(i, i + concurrency)
+      const results = await Promise.all(
+        batch.map(async (f) => {
+          if (f.useCache && f.prev) {
+            const genre = f.prev.genre
+            return { abs: f.abs, mtime: f.mtime, genre, genres: f.prev.genres ?? (f.prev.genre ? [f.prev.genre] : []) }
+          } else {
+            try {
+              const { common } = await parseFile(f.abs, { skipCovers: true, duration: false })
+              const genres = common.genre ?? []
+              return { abs: f.abs, mtime: f.mtime, genre: genres[0] ?? null, genres }
+            } catch {
+              return { abs: f.abs, mtime: f.mtime, genre: null, genres: [] }
+            }
+          }
+        })
+      )
+      parseResults.push(...results)
+    }
+    return parseResults
+  }
+
   try {
     await walk(MUSIC_ROOT)
+    const parseResults = await parseFilesInBatches(filesToParse)
+
+    // Phase 3: Process results sequentially (no race conditions)
+    for (const { abs, mtime, genre, genres } of parseResults) {
+      newFileCache[abs] = { genre, genres, mtime }
+      if (genre) { counts.set(genre, (counts.get(genre) ?? 0) + 1); p.genres = counts.size }
+    }
+
     fileCache = newFileCache
+    invertedIndex = buildInvertedIndex(fileCache)
     const data = Array.from(counts.entries())
       .map(([genre, count]) => ({ genre, count }))
       .sort((a, b) => b.count - a.count)
@@ -206,19 +259,33 @@ genresRouter.post('/map/prune', async (_req, res) => {
 })
 
 // Co-occurrence matrix — which genre tokens share the same files
+// Uses inverted index for efficient computation (O(G²) instead of O(N*M²))
 // Requires a rescan to populate fileCache.genres; old single-genre entries are handled gracefully
 genresRouter.get('/cooccurrence', (_req, res) => {
   const tokenCounts = new Map<string, number>()
   const pairCounts  = new Map<string, number>()
 
-  for (const entry of Object.values(fileCache)) {
-    const genres = entry.genres?.length ? entry.genres : (entry.genre ? [entry.genre] : [])
-    if (!genres.length) continue
-    for (const g of genres) tokenCounts.set(g, (tokenCounts.get(g) ?? 0) + 1)
-    for (let i = 0; i < genres.length; i++) {
-      for (let j = i + 1; j < genres.length; j++) {
+  // Build token counts from inverted index
+  for (const [genre, files] of invertedIndex) {
+    tokenCounts.set(genre, files.size)
+  }
+
+  // Build pair counts from genre intersections
+  const genres = Array.from(invertedIndex.keys())
+  for (let i = 0; i < genres.length; i++) {
+    for (let j = i + 1; j < genres.length; j++) {
+      const filesI = invertedIndex.get(genres[i])!
+      const filesJ = invertedIndex.get(genres[j])!
+
+      // Count files that contain both genres
+      let intersection = 0
+      for (const file of filesI) {
+        if (filesJ.has(file)) intersection++
+      }
+
+      if (intersection > 0) {
         const key = [genres[i], genres[j]].sort().join('\x00')
-        pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1)
+        pairCounts.set(key, intersection)
       }
     }
   }
