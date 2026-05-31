@@ -4,6 +4,7 @@ import path from 'path'
 import { parseFile } from 'music-metadata'
 import { File as TagFile } from 'node-taglib-sharp'
 import { MUSIC_ROOT } from '../lib/roots.js'
+import { translateGenres } from '../lib/translate.js'
 
 export const genresRouter = Router()
 
@@ -665,4 +666,26 @@ genresRouter.post('/normalize', (req, res) => {
     runNormalize(dry)
   }
   res.json({ ok: true })
+})
+
+// Translate non-Latin script genres to English
+// Returns: { original, hasNonLatin, translated?, error? }
+genresRouter.get('/translate', async (_req, res) => {
+  if (!scanState.result || scanState.result.length === 0) {
+    res.json({ error: 'No genres scanned yet', translations: [] })
+    return
+  }
+
+  const genres = scanState.result.map(r => r.genre)
+  const translations = await translateGenres(genres)
+
+  res.json({
+    total: translations.length,
+    nonLatin: translations.filter(t => t.hasNonLatin).length,
+    translations: translations.sort((a, b) => {
+      if (a.hasNonLatin && !b.hasNonLatin) return -1
+      if (!a.hasNonLatin && b.hasNonLatin) return 1
+      return a.original.localeCompare(b.original)
+    })
+  })
 })

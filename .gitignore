@@ -7,3 +7,4 @@ server/.env
 server/genre-scan-cache.json
 *.log
 .vite/
+.claude/
