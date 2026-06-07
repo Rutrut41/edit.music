@@ -3,10 +3,14 @@ import fs from 'fs/promises'
 import path from 'path'
 import { parseFile } from 'music-metadata'
 import { File as TagFile } from 'node-taglib-sharp'
-import { MUSIC_ROOT } from '../lib/roots.js'
+import { getConfig } from '../lib/config.js'
 import { translateGenres } from '../lib/translate.js'
 
 export const genresRouter = Router()
+
+function getMusicRoot(): string {
+  return getConfig().musicRoot || process.env.MUSIC_ROOT || '/storage/music'
+}
 
 const AUDIO_EXTS    = new Set(['.mp3', '.flac', '.m4a', '.ogg', '.wav', '.aiff', '.aif', '.opus'])
 const MAP_PATH      = path.resolve(process.cwd(), 'genre-map.json')
@@ -193,7 +197,7 @@ async function runScan(incremental = false) {
         // Artist = grandparent of the audio file (works regardless of MUSIC_ROOT depth)
         const albumDir = path.dirname(abs)
         const artistDir = path.dirname(albumDir)
-        const rel = path.relative(MUSIC_ROOT, artistDir)
+        const rel = path.relative(getMusicRoot(), artistDir)
         if (rel && !rel.startsWith('..')) {
           const artist = path.basename(artistDir)
           if (!artistSet.has(artistDir)) { artistSet.add(artistDir); p.artists = artistSet.size; p.current = artist }
@@ -250,7 +254,7 @@ async function runScan(incremental = false) {
   }
 
   try {
-    await walk(MUSIC_ROOT)
+    await walk(getMusicRoot())
     const statResults = await statFilesInBatches(filePaths)
 
     // Build filesToParse from stat results with incremental check
@@ -527,7 +531,7 @@ async function runTokenize(dry: boolean) {
   }
 
   try {
-    await walk(MUSIC_ROOT)
+    await walk(getMusicRoot())
     const parseResults = await parseFilesInBatches(filePaths)
 
     // Build toChange from parse results
@@ -674,7 +678,7 @@ async function runNormalize(dry: boolean) {
   }
 
   try {
-    await walk(MUSIC_ROOT)
+    await walk(getMusicRoot())
     const parseResults = await parseFilesInBatches(filePaths)
 
     normalizeState.toChange = parseResults.length
