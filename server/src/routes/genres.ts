@@ -31,6 +31,7 @@ interface CacheFile {
   scannedAt: string
   data: { genre: string; count: number }[]
   files?: Record<string, FileEntry>
+  invertedIndex?: Record<string, string[]>
 }
 
 // Per-file genre + mtime — lives in memory, persisted in cache JSON
@@ -40,11 +41,23 @@ let fileCache: Record<string, FileEntry> = {}
 let invertedIndex: Map<string, Set<string>> = new Map()
 
 async function loadScanCache(): Promise<CacheFile | null> {
-  try { return JSON.parse(await fs.readFile(CACHE_PATH, 'utf8')) } catch { return null }
+  try {
+    const cached = JSON.parse(await fs.readFile(CACHE_PATH, 'utf8')) as CacheFile
+    // Load inverted index if cached
+    if (cached.invertedIndex) {
+      invertedIndex = deserializeInvertedIndex(cached.invertedIndex)
+    }
+    return cached
+  } catch { return null }
 }
 
-async function saveScanCache(data: { genre: string; count: number }[]) {
-  const payload: CacheFile = { scannedAt: new Date().toISOString(), data, files: fileCache }
+async function saveScanCache(data: { genre: string; count: number }[], index?: Map<string, Set<string>>) {
+  const payload: CacheFile = {
+    scannedAt: new Date().toISOString(),
+    data,
+    files: fileCache,
+    invertedIndex: index ? serializeInvertedIndex(index) : undefined,
+  }
   await fs.writeFile(CACHE_PATH, JSON.stringify(payload)).catch(() => {})
 }
 
@@ -60,6 +73,49 @@ function buildInvertedIndex(cache: Record<string, FileEntry>): Map<string, Set<s
     }
   }
   return index
+}
+
+// Serialize inverted index for JSON storage
+function serializeInvertedIndex(index: Map<string, Set<string>>): Record<string, string[]> {
+  const serialized: Record<string, string[]> = {}
+  for (const [genre, filePaths] of index) {
+    serialized[genre] = Array.from(filePaths).sort()
+  }
+  return serialized
+}
+
+// Deserialize inverted index from JSON
+function deserializeInvertedIndex(serialized: Record<string, string[]>): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>()
+  for (const [genre, filePaths] of Object.entries(serialized)) {
+    index.set(genre, new Set(filePaths))
+  }
+  return index
+}
+
+// Compute cooccurrence matrix from inverted index
+function computeCooccurrence(index: Map<string, Set<string>>): Array<{ a: string; b: string; count: number }> {
+  const pairCounts = new Map<string, number>()
+  const genres = Array.from(index.keys())
+
+  for (let i = 0; i < genres.length; i++) {
+    for (let j = i + 1; j < genres.length; j++) {
+      const filesI = index.get(genres[i])!
+      const filesJ = index.get(genres[j])!
+      let intersection = 0
+      for (const file of filesI) {
+        if (filesJ.has(file)) intersection++
+      }
+      if (intersection > 0) {
+        const key = [genres[i], genres[j]].sort().join('\x00')
+        pairCounts.set(key, intersection)
+      }
+    }
+  }
+
+  return Array.from(pairCounts.entries())
+    .map(([key, count]) => { const [a, b] = key.split('\x00'); return { a, b, count } })
+    .sort((a, b) => b.count - a.count)
 }
 
 async function loadMap(): Promise<Record<string, string>> {
@@ -80,6 +136,7 @@ interface ScanState {
   running: boolean
   progress: { folders: number; artists: number; tracks: number; genres: number; current: string } | null
   result: { genre: string; count: number }[] | null
+  cooccurrence?: { a: string; b: string; count: number }[] | null
   scannedAt: string | null
   error: string | null
 }
@@ -215,12 +272,13 @@ async function runScan(incremental = false) {
 
     fileCache = newFileCache
     invertedIndex = buildInvertedIndex(fileCache)
+    const cooccurrenceData = computeCooccurrence(invertedIndex)
     const data = Array.from(counts.entries())
       .map(([genre, count]) => ({ genre, count }))
       .sort((a, b) => b.count - a.count)
     const scannedAt = new Date().toISOString()
-    await saveScanCache(data)
-    scanState = { running: false, progress: null, result: data, scannedAt, error: null }
+    await saveScanCache(data, invertedIndex)
+    scanState = { running: false, progress: null, result: data, cooccurrence: cooccurrenceData, scannedAt, error: null }
     if (useIncremental) console.log(`[genres] incremental scan done: ${p.tracks} files walked, ${data.length} genres`)
   } catch (e: any) {
     scanState = { running: false, progress: null, result: null, scannedAt: null, error: e.message }
