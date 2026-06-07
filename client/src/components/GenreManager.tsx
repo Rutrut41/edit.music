@@ -30,6 +30,7 @@ export function GenreManager() {
   const tokPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [phrases, setPhrases] = useState<string[]>([])
   const [phraseInput, setPhraseInput] = useState('')
+  const [showFreshScanConfirm, setShowFreshScanConfirm] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const normPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -261,12 +262,19 @@ export function GenreManager() {
         position: 'sticky', top: 0, background: 'var(--surface)', zIndex: 1,
         paddingBottom: '12px',
       }}>
-        <button onClick={() => scan(false)} disabled={scanning} style={{
+        <button onClick={() => scan(true)} disabled={scanning} style={{
           padding: '7px 14px', borderRadius: '5px', fontSize: '13px', fontWeight: 600,
           background: 'var(--accent)', border: 'none', color: '#fff', cursor: 'pointer',
           opacity: scanning ? 0.7 : 1,
         }}>
-          {scanning ? 'Scanning…' : genres.length > 0 ? '↺ Rescan' : 'Scan Library'}
+          {scanning ? 'Scanning…' : genres.length > 0 ? '↺ Scan' : 'Scan Library'}
+        </button>
+        <button onClick={() => setShowFreshScanConfirm(true)} disabled={scanning} style={{
+          padding: '7px 14px', borderRadius: '5px', fontSize: '13px', fontWeight: 600,
+          background: 'none', border: '1px solid var(--accent)', color: 'var(--accent)', cursor: 'pointer',
+          opacity: scanning ? 0.7 : 1,
+        }}>
+          Fresh Scan
         </button>
         {scannedAt && !scanning && (
           <span style={{ fontSize: '11px', color: 'var(--muted)' }}>
@@ -653,6 +661,37 @@ export function GenreManager() {
           </div>
         )
       })}
+      {showFreshScanConfirm && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 9999,
+        }}>
+          <div style={{
+            background: 'var(--surface)', borderRadius: '8px', padding: '20px',
+            maxWidth: '400px', boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
+          }}>
+            <h3 style={{ margin: '0 0 12px 0', fontSize: '16px', fontWeight: 600 }}>Fresh Scan</h3>
+            <p style={{ margin: '0 0 16px 0', fontSize: '14px', color: 'var(--muted)', lineHeight: '1.5' }}>
+              This will rescan all files from scratch and clear the cache. Use this if metadata has changed significantly. Continue?
+            </p>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowFreshScanConfirm(false)} style={{
+                padding: '8px 16px', borderRadius: '5px', fontSize: '13px',
+                background: 'none', border: '1px solid var(--border)', color: 'var(--muted)', cursor: 'pointer',
+              }}>
+                Cancel
+              </button>
+              <button onClick={() => { setShowFreshScanConfirm(false); scan(false) }} style={{
+                padding: '8px 16px', borderRadius: '5px', fontSize: '13px', fontWeight: 600,
+                background: '#ef4444', border: 'none', color: '#fff', cursor: 'pointer',
+              }}>
+                Fresh Scan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
