@@ -4,6 +4,7 @@ import { TagEditor } from './components/TagEditor.js'
 import { Player } from './components/Player.js'
 import { SearchBar } from './components/SearchBar.js'
 import { GenreManager } from './components/GenreManager.js'
+import { Setup } from './components/Setup.js'
 import { useQueue } from './hooks/useQueue.js'
 
 export type Location = 'music' | 'recycle'
@@ -69,10 +70,21 @@ function useServerStatus(): ServerStatus | null {
 export function App() {
   const [activeTab, setActiveTab] = useState<Tab>('music')
   const [selectedTrack, setSelectedTrack] = useState<TrackRef | null>(null)
+  const [configured, setConfigured] = useState<boolean | null>(null)
   const queue = useQueue()
   const serverStatus = useServerStatus()
 
+  useEffect(() => {
+    fetch('/api/config')
+      .then(r => r.json())
+      .then(cfg => setConfigured(!!cfg.configured))
+      .catch(() => setConfigured(true))
+  }, [])
+
   const activeLocation: Location = activeTab === 'recycle' ? 'recycle' : 'music'
+
+  if (configured === null) return null
+  if (!configured) return <Setup onComplete={() => setConfigured(true)} />
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
